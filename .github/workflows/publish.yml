@@ -23,11 +23,16 @@ jobs:
 
       - name: Auto-increment version
         run: |
-          # Get current version and increment patch
-          CURRENT=$(grep -oP 'version="\K[^"]+' setup.py)
+          # Get latest version from PyPI (fallback to local if not published)
+          PYPI_VERSION=$(pip index versions codeblur 2>/dev/null | grep -oP 'codeblur \(\K[^)]+' || echo "0.0.0")
+          LOCAL_VERSION=$(grep -oP 'version="\K[^"]+' setup.py)
+
+          # Use whichever is higher
+          CURRENT=$(echo -e "$PYPI_VERSION\n$LOCAL_VERSION" | sort -V | tail -1)
+
           IFS='.' read -r major minor patch <<< "$CURRENT"
           NEW_VERSION="$major.$minor.$((patch + 1))"
-          sed -i "s/version=\"$CURRENT\"/version=\"$NEW_VERSION\"/" setup.py
+          sed -i "s/version=\"$LOCAL_VERSION\"/version=\"$NEW_VERSION\"/" setup.py
           echo "Updated version: $CURRENT -> $NEW_VERSION"
 
       - name: Build package
