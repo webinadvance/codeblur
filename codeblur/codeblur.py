@@ -23,9 +23,21 @@ class CodeBlur:
 
         self.root.configure(bg=self.bg_color)
 
-        # Storage file for mappings
-        self.mappings_file = "obfuscation_mappings.json"
+        # User data directory (cross-platform)
+        self.app_data_dir = self.get_app_data_dir()
+        os.makedirs(self.app_data_dir, exist_ok=True)
+
+        # Storage file for mappings (in user data dir)
+        self.mappings_file = os.path.join(self.app_data_dir, "obfuscation_mappings.json")
         self.mappings = self.load_mappings()
+
+        # Known words dictionary (language-agnostic)
+        # Default known_words.json is in the package directory
+        package_dir = os.path.dirname(os.path.abspath(__file__))
+        self.default_known_words_file = os.path.join(package_dir, "known_words.json")
+        # User can customize in app data dir
+        self.known_words_file = os.path.join(self.app_data_dir, "known_words.json")
+        self.known_words = self.load_known_words()
 
         # State tracking for 2-state button
         self.clear_button_armed = False
@@ -41,6 +53,20 @@ class CodeBlur:
         # Load clipboard on startup
         self.load_clipboard()
 
+    def get_app_data_dir(self):
+        """Get cross-platform app data directory"""
+        import platform
+        system = platform.system()
+
+        if system == "Windows":
+            base = os.environ.get("APPDATA", os.path.expanduser("~"))
+        elif system == "Darwin":  # macOS
+            base = os.path.join(os.path.expanduser("~"), "Library", "Application Support")
+        else:  # Linux and others
+            base = os.environ.get("XDG_DATA_HOME", os.path.join(os.path.expanduser("~"), ".local", "share"))
+
+        return os.path.join(base, "codeblur")
+
     def load_mappings(self):
         """Load existing mappings from JSON file"""
         if os.path.exists(self.mappings_file):
@@ -55,6 +81,84 @@ class CodeBlur:
         """Save mappings to JSON file"""
         with open(self.mappings_file, 'w', encoding='utf-8') as f:
             json.dump(self.mappings, f, indent=2, ensure_ascii=False)
+
+    def load_known_words(self):
+        """Load known words dictionary from JSON file"""
+        # If user has customized file, use it
+        if os.path.exists(self.known_words_file):
+            try:
+                with open(self.known_words_file, 'r', encoding='utf-8') as f:
+                    return set(json.load(f))
+            except:
+                pass
+
+        # Try to load from package default
+        if os.path.exists(self.default_known_words_file):
+            try:
+                with open(self.default_known_words_file, 'r', encoding='utf-8') as f:
+                    words = set(json.load(f))
+                # Copy to user dir for customization
+                self.save_known_words_to_file(words)
+                return words
+            except:
+                pass
+
+        # Fallback to hardcoded defaults
+        words = self.get_default_known_words()
+        self.save_known_words_to_file(words)
+        return words
+
+    def get_default_known_words(self):
+        """Return default set of known words (generic, language-agnostic)"""
+        return {
+            # Common programming verbs
+            "get", "set", "is", "has", "can", "should", "will", "did",
+            "on", "off", "add", "remove", "create", "delete", "update",
+            "find", "fetch", "load", "save", "send", "receive",
+            "start", "stop", "init", "reset", "clear", "close", "open",
+            "show", "hide", "toggle", "enable", "disable",
+            "click", "change", "submit", "focus", "blur",
+            "render", "mount", "unmount", "destroy",
+            "push", "pop", "shift", "slice", "splice", "concat",
+            "join", "split", "trim", "replace", "match", "test", "search",
+            "parse", "stringify", "encode", "decode",
+            "extend", "implement", "override",
+            # Common nouns
+            "data", "info", "list", "item", "items", "array", "object",
+            "error", "success", "fail", "complete", "pending",
+            "event", "handler", "listener", "callback",
+            "request", "response", "status", "message",
+            "id", "key", "value", "index", "length", "size", "count",
+            "name", "type", "state", "config", "options",
+            "result", "output", "input", "params", "args",
+            "url", "path", "route", "query", "body", "header",
+            "text", "font", "style", "display", "position",
+            "component", "module", "service", "controller", "model", "view",
+            "min", "max", "sum", "avg", "total", "current", "next", "prev",
+            "first", "last", "before", "after",
+            "timeout", "interval", "delay", "wait",
+            # Common prepositions/connectors
+            "to", "from", "by", "with", "in", "out", "up", "down",
+            "all", "any", "some", "none", "each", "every",
+            # Common suffixes/prefixes
+            "async", "sync", "Async", "Sync",
+            "local", "global", "public", "private", "static",
+            # Common keywords (multi-language)
+            "true", "false", "null", "new", "this", "self",
+            "if", "else", "for", "while", "do", "switch", "case",
+            "try", "catch", "finally", "throw", "return",
+            "function", "class", "const", "let", "var",
+            "import", "export", "default", "require",
+        }
+
+    def save_known_words(self):
+        """Save current known words to JSON file"""
+        self.save_known_words_to_file(self.known_words)
+
+    def save_known_words_to_file(self, words):
+        """Save known words set to JSON file (sorted for easy editing)"""
+        with open(self.known_words_file, 'w', encoding='utf-8') as f:
+            json.dump(sorted(list(words)), f, indent=2, ensure_ascii=False)
 
     def generate_ai_identifier(self, original_word):
         """Generate AI-like identifier for anonymization"""
@@ -83,7 +187,7 @@ class CodeBlur:
 
         return new_identifier
 
-    def create_neubrutalist_button(self, parent, text, command, bg_color, size="normal"):
+    def create_neubrutalist_button(self, parent, text, command, bg_color):
         """Create a Neubrutalist style button with thick border and solid shadow"""
         # Container frame for shadow effect
         shadow_frame = tk.Frame(parent, bg=self.border_color, highlightthickness=0)
@@ -91,22 +195,12 @@ class CodeBlur:
         # Determine text color based on background
         text_color = self.bg_color if bg_color in [self.primary_color, self.accent_color] else self.text_color
 
-        # Size settings
-        if size == "large":
-            font_size = 12
-            padx = 24
-            pady = 16
-        else:  # small
-            font_size = 9
-            padx = 12
-            pady = 8
-
-        # Button with thick border
+        # Button with thick border - all same size
         btn = tk.Button(
             shadow_frame,
             text=text,
             command=command,
-            font=("Consolas", font_size, "bold"),
+            font=("Consolas", 10, "bold"),
             bg=bg_color,
             fg=text_color,
             activebackground=bg_color,
@@ -116,8 +210,8 @@ class CodeBlur:
             highlightbackground=self.border_color,
             highlightthickness=5,
             cursor="hand2",
-            padx=padx,
-            pady=pady
+            padx=16,
+            pady=10
         )
         btn.pack(padx=(0, 5), pady=(0, 5))
 
@@ -125,25 +219,35 @@ class CodeBlur:
 
     def create_widgets(self):
         """Create the UI components"""
-        # Top frame with buttons
-        top_frame = tk.Frame(self.root, bg=self.bg_color)
-        top_frame.pack(fill=tk.X, padx=8, pady=8)
+        # Top frame container for button rows
+        buttons_container = tk.Frame(self.root, bg=self.bg_color)
+        buttons_container.pack(fill=tk.X, padx=8, pady=8)
 
-        # Neubrutalist buttons with monochrome colors and blue accent
-        btn2 = self.create_neubrutalist_button(top_frame, "COPY AND CLOSE", self.copy_and_close, self.accent_color, size="large")
-        btn2.pack(side=tk.LEFT, padx=(0, 8))
+        # Row 1
+        row1 = tk.Frame(buttons_container, bg=self.bg_color)
+        row1.pack(pady=(0, 8))
 
-        btn3 = self.create_neubrutalist_button(top_frame, "AUTO-OBFUSCATE STRINGS", self.auto_obfuscate_strings, self.accent_color, size="small")
-        btn3.pack(side=tk.LEFT, padx=(0, 8))
+        btn2 = self.create_neubrutalist_button(row1, "COPY AND CLOSE", self.copy_and_close, self.accent_color)
+        btn2.pack(side=tk.LEFT, padx=4)
 
-        btn4 = self.create_neubrutalist_button(top_frame, "REMOVE COMMENTS", self.remove_all_comments, self.accent_color, size="small")
-        btn4.pack(side=tk.LEFT, padx=(0, 8))
+        btn_obf = self.create_neubrutalist_button(row1, "AUTO-OBFUSCATE", self.obfuscate_all, "#FF6600")
+        btn_obf.pack(side=tk.LEFT, padx=4)
 
-        btn5 = self.create_neubrutalist_button(top_frame, "DEOBFUSCATE", self.copy_deobfuscated, "#00CC00", size="small")
-        btn5.pack(side=tk.LEFT, padx=(0, 8))
+        btn5 = self.create_neubrutalist_button(row1, "DEOBFUSCATE", self.deobfuscate_and_show, "#00CC00")
+        btn5.pack(side=tk.LEFT, padx=4)
 
-        self.clear_button = self.create_neubrutalist_button(top_frame, "CLEAR", self.clear_mappings_2state, self.secondary_color, size="small")
-        self.clear_button.pack(side=tk.LEFT, padx=(0, 8))
+        self.clear_button = self.create_neubrutalist_button(row1, f"CLEAR ({len(self.mappings)})", self.clear_mappings_2state, self.secondary_color)
+        self.clear_button.pack(side=tk.LEFT, padx=4)
+
+        # Row 2
+        row2 = tk.Frame(buttons_container, bg=self.bg_color)
+        row2.pack()
+
+        btn3 = self.create_neubrutalist_button(row2, "OBFUSCATE STRINGS", self.auto_obfuscate_strings, self.accent_color)
+        btn3.pack(side=tk.LEFT, padx=4)
+
+        btn4 = self.create_neubrutalist_button(row2, "REMOVE COMMENTS", self.remove_all_comments, self.accent_color)
+        btn4.pack(side=tk.LEFT, padx=4)
 
         # Main text area with thick border and shadow - zero padding
         text_shadow_frame = tk.Frame(self.root, bg=self.border_color)
@@ -193,6 +297,9 @@ class CodeBlur:
 
         # Bind Ctrl+V to load clipboard
         self.root.bind("<Control-v>", lambda e: self.load_clipboard())
+
+        # Bind Ctrl+C to copy all text
+        self.root.bind("<Control-c>", lambda e: self.copy_all_text())
 
         # Disable text selection
         self.text_area.bind("<B1-Motion>", lambda e: "break")
@@ -284,6 +391,8 @@ class CodeBlur:
                 end = f"{start}+{len(obfuscated)}c"
                 self.text_area.tag_add("obfuscated", start, end)
                 start = end
+        # Update clear button count
+        self.update_clear_button_text()
 
     def get_word_at_click(self, event):
         """Get the word at the click position"""
@@ -468,6 +577,96 @@ class CodeBlur:
         # Highlight obfuscated text
         self.highlight_obfuscated_text()
 
+    def split_camel_case(self, word):
+        """Split camelCase or PascalCase word into parts"""
+        import re
+        # Split on transitions: lowercase->uppercase, or before sequences of uppercase followed by lowercase
+        parts = re.findall(r'[A-Z]?[a-z]+|[A-Z]+(?=[A-Z][a-z]|\d|\W|$)|\d+', word)
+        return parts if parts else [word]
+
+    def auto_obfuscate_word(self, word):
+        """Obfuscate a single word for auto-obfuscate, preserving known parts"""
+        # Check if the whole word is known (case-insensitive check)
+        if word in self.known_words or word.lower() in {w.lower() for w in self.known_words}:
+            return word
+
+        # Split into camelCase parts
+        parts = self.split_camel_case(word)
+
+        if len(parts) <= 1:
+            # Single word, not in dictionary - obfuscate it
+            if word not in self.mappings:
+                identifier = self.generate_ai_identifier(word)
+                self.mappings[word] = identifier
+            return self.mappings[word]
+
+        # Process composite word - keep known parts, obfuscate unknown
+        result_parts = []
+        unknown_sequence = []
+
+        for part in parts:
+            # Check if this part is known (case-insensitive)
+            is_known = part in self.known_words or part.lower() in {w.lower() for w in self.known_words}
+
+            if is_known:
+                # If we have accumulated unknown parts, obfuscate them as a group
+                if unknown_sequence:
+                    unknown_combined = ''.join(unknown_sequence)
+                    if unknown_combined not in self.mappings:
+                        identifier = self.generate_ai_identifier(unknown_combined)
+                        self.mappings[unknown_combined] = identifier
+                    result_parts.append(self.mappings[unknown_combined])
+                    unknown_sequence = []
+                result_parts.append(part)
+            else:
+                unknown_sequence.append(part)
+
+        # Handle any remaining unknown parts at the end
+        if unknown_sequence:
+            unknown_combined = ''.join(unknown_sequence)
+            if unknown_combined not in self.mappings:
+                identifier = self.generate_ai_identifier(unknown_combined)
+                self.mappings[unknown_combined] = identifier
+            result_parts.append(self.mappings[unknown_combined])
+
+        return ''.join(result_parts)
+
+    def obfuscate_all(self):
+        """Obfuscate all unknown words, keep known ones"""
+        import re
+
+        # Save state before making changes
+        self.save_state()
+
+        # Save current scroll position
+        scroll_position = self.text_area.yview()
+
+        # Get current text content
+        text_content = self.text_area.get(1.0, "end-1c")
+
+        # Find all identifiers (words starting with letter or underscore)
+        identifier_pattern = r'\b[a-zA-Z_][a-zA-Z0-9_]*\b'
+
+        def replace_identifier(match):
+            word = match.group(0)
+            return self.auto_obfuscate_word(word)
+
+        # Replace all identifiers
+        text_content = re.sub(identifier_pattern, replace_identifier, text_content)
+
+        # Save mappings
+        self.save_mappings()
+
+        # Update text area
+        self.text_area.delete(1.0, tk.END)
+        self.text_area.insert(1.0, text_content)
+
+        # Restore scroll position
+        self.text_area.yview_moveto(scroll_position[0])
+
+        # Highlight obfuscated text
+        self.highlight_obfuscated_text()
+
     def remove_all_comments(self):
         """Remove all comments from code (supports multiple languages)"""
         import re
@@ -569,8 +768,8 @@ class CodeBlur:
             # Re-highlight remaining obfuscated text
             self.highlight_obfuscated_text()
 
-    def copy_deobfuscated(self):
-        """Copy deobfuscated text (all mappings reversed) to clipboard and show in UI"""
+    def deobfuscate_and_show(self):
+        """Deobfuscate text and show in UI (also copy to clipboard)"""
         # Save state before making changes
         self.save_state()
 
@@ -599,6 +798,15 @@ class CodeBlur:
         # Clear highlights since text is now deobfuscated
         self.text_area.tag_remove("obfuscated", "1.0", tk.END)
 
+        # Update clear button
+        self.update_clear_button_text()
+
+    def copy_all_text(self):
+        """Copy all text to clipboard"""
+        text_content = self.text_area.get(1.0, "end-1c")
+        if text_content:
+            pyperclip.copy(text_content)
+
     def copy_and_close(self):
         """Copy the obfuscated text to clipboard and close the application"""
         text_content = self.text_area.get(1.0, tk.END).strip()
@@ -620,18 +828,22 @@ class CodeBlur:
             self.clear_mappings()
             self.reset_clear_button()
 
-    def update_clear_button_text(self, text):
+    def update_clear_button_text(self, text=None):
         """Update the clear button text"""
         # Find the actual button widget inside the shadow frame
         for widget in self.clear_button.winfo_children():
             if isinstance(widget, tk.Button):
-                widget.config(text=text, bg="#FF0000" if "CONFIRM" in text else self.secondary_color)
+                if text is None:
+                    # Default: show count
+                    widget.config(text=f"CLEAR ({len(self.mappings)})", bg=self.secondary_color)
+                else:
+                    widget.config(text=text, bg="#FF0000" if "CONFIRM" in text else self.secondary_color)
                 break
 
     def reset_clear_button(self):
         """Reset clear button to initial state"""
         self.clear_button_armed = False
-        self.update_clear_button_text("CLEAR")
+        self.update_clear_button_text()
 
     def clear_mappings(self):
         """Clear all mappings and restore original text"""

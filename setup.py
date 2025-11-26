@@ -13,6 +13,10 @@ setup(
     long_description_content_type="text/markdown",
     url="https://pypi.org/project/codeblur/",
     packages=find_packages(),
+    package_data={
+        "codeblur": ["known_words.json"],
+    },
+    include_package_data=True,
     classifiers=[
         "Programming Language :: Python :: 3",
         "License :: OSI Approved :: MIT License",
