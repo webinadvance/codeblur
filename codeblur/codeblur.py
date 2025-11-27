@@ -31,8 +31,13 @@ class CodeBlur:
         },
         3: {
             "name": "PHANTOM",
-            "description": "Obfuscate string contents and GUIDs",
-            "actions": ["obfuscate_strings", "obfuscate_guids"],
+            "description": "Obfuscate string contents, GUIDs, and paths",
+            "actions": ["obfuscate_strings", "obfuscate_guids", "obfuscate_paths"],
+        },
+        4: {
+            "name": "SKELETON",
+            "description": "Remove function/method bodies, keep only signatures",
+            "actions": ["remove_function_bodies"],
         },
     }
 
@@ -671,8 +676,8 @@ class CodeBlur:
     def is_obfuscated_identifier(self, word):
         """Check if word matches our obfuscated identifier pattern (e.g., ENTITY001, PERSON042, GUID001)"""
         import re
-        # Match pattern: CATEGORY + NUMBERS (e.g., PERSON001, ENTITY042, ORG003, GUID001, COMMENT001)
-        categories = ['PERSON', 'ENTITY', 'ORG', 'ITEM', 'NAME', 'ID', 'REF', 'GUID', 'COMMENT']
+        # Match pattern: CATEGORY + NUMBERS (e.g., PERSON001, ENTITY042, ORG003, GUID001, COMMENT001, BODY001, PATH001)
+        categories = ['PERSON', 'ENTITY', 'ORG', 'ITEM', 'NAME', 'ID', 'REF', 'GUID', 'COMMENT', 'BODY', 'PATH']
         pattern = r'^(' + '|'.join(categories) + r')\d+$'
         return bool(re.match(pattern, word))
 
@@ -794,11 +799,6 @@ class CodeBlur:
     def on_obfuscation_complete(self):
         """Called when obfuscation is done - update UI"""
         self.is_obfuscating = False
-
-        # Copy result to clipboard
-        text_content = self.text_area.get(1.0, "end-1c")
-        if text_content:
-            pyperclip.copy(text_content)
 
         # Re-enable and update button text
         self.set_obfuscate_button_enabled(True)
@@ -1184,6 +1184,295 @@ class CodeBlur:
         self.save_mappings()
         self.text_area.delete(1.0, tk.END)
         self.text_area.insert(1.0, text_content)
+        self.text_area.yview_moveto(scroll_position[0])
+        self.highlight_obfuscated_text()
+
+    def _action_obfuscate_paths(self):
+        """Action: Obfuscate file paths, URLs, and API routes"""
+        import re
+
+        # Save current scroll position
+        scroll_position = self.text_area.yview()
+
+        # Get current text content
+        text_content = self.text_area.get(1.0, "end-1c")
+
+        # Get next PATH number
+        existing_nums = []
+        for mapped_value in self.mappings.values():
+            if mapped_value.startswith('PATH') and len(mapped_value) > 4:
+                try:
+                    num_part = mapped_value[4:]
+                    if num_part.isdigit():
+                        existing_nums.append(int(num_part))
+                except:
+                    pass
+        path_counter = max(existing_nums) + 1 if existing_nums else 1
+
+        paths_to_replace = []
+
+        # Pattern for various path formats:
+        # 1. Windows paths: C:\Users\..., \\server\share, ..\folder
+        # 2. Unix paths: /usr/local/..., ./folder, ../folder
+        # 3. URLs: http://, https://, ftp://, file://
+        # 4. API routes: /api/v1/users, /users/{id}
+        # 5. Relative paths: folder/subfolder, ./src/components
+
+        # URLs (http, https, ftp, file, ws, wss)
+        url_pattern = r'(?:https?|ftp|file|wss?)://[^\s\'"<>)}\]]+'
+
+        # Windows absolute paths (C:\, D:\, etc.) - in strings
+        windows_abs_pattern = r'[A-Za-z]:\\(?:[^\\/:*?"<>|\s\'"]|\\)+'
+
+        # UNC paths (\\server\share)
+        unc_pattern = r'\\\\[^\s\'"<>]+'
+
+        # Unix absolute paths (/usr, /home, /var, etc.)
+        unix_abs_pattern = r'(?<=["\'])\/(?:[a-zA-Z0-9_\-./]+)+(?=["\'])'
+
+        # API routes and relative paths starting with /
+        api_route_pattern = r'(?<=["\'])/[a-zA-Z0-9_\-{}./:\[\]@]+(?=["\'])'
+
+        # Relative paths with ./ or ../
+        relative_pattern = r'\.\.?/[a-zA-Z0-9_\-./]+'
+
+        # Generic path-like patterns (folder/file.ext)
+        generic_path_pattern = r'(?<=["\'])[a-zA-Z0-9_\-]+(?:/[a-zA-Z0-9_\-./]+)+(?=["\'])'
+
+        # Find URLs
+        for match in re.finditer(url_pattern, text_content):
+            path = match.group(0)
+            if path and not path.startswith('PATH') and path not in self.mappings.values():
+                paths_to_replace.append((match.start(), match.end(), path))
+
+        # Find Windows paths
+        for match in re.finditer(windows_abs_pattern, text_content):
+            path = match.group(0)
+            if path and not path.startswith('PATH') and path not in self.mappings.values():
+                paths_to_replace.append((match.start(), match.end(), path))
+
+        # Find UNC paths
+        for match in re.finditer(unc_pattern, text_content):
+            path = match.group(0)
+            if path and not path.startswith('PATH') and path not in self.mappings.values():
+                paths_to_replace.append((match.start(), match.end(), path))
+
+        # Find Unix paths (lookbehind for quote)
+        for match in re.finditer(unix_abs_pattern, text_content):
+            path = match.group(0)
+            if path and len(path) > 1 and not path.startswith('PATH') and path not in self.mappings.values():
+                paths_to_replace.append((match.start(), match.end(), path))
+
+        # Find API routes
+        for match in re.finditer(api_route_pattern, text_content):
+            path = match.group(0)
+            if path and len(path) > 1 and not path.startswith('PATH') and path not in self.mappings.values():
+                paths_to_replace.append((match.start(), match.end(), path))
+
+        # Find relative paths
+        for match in re.finditer(relative_pattern, text_content):
+            path = match.group(0)
+            if path and not path.startswith('PATH') and path not in self.mappings.values():
+                paths_to_replace.append((match.start(), match.end(), path))
+
+        # Find generic paths
+        for match in re.finditer(generic_path_pattern, text_content):
+            path = match.group(0)
+            if path and len(path) > 3 and not path.startswith('PATH') and path not in self.mappings.values():
+                # Skip if looks like a version number or simple ratio
+                if not re.match(r'^[0-9.]+$', path):
+                    paths_to_replace.append((match.start(), match.end(), path))
+
+        if not paths_to_replace:
+            return
+
+        # Remove duplicates and sort by position (reverse)
+        seen = set()
+        unique_paths = []
+        for item in paths_to_replace:
+            key = (item[0], item[1])
+            if key not in seen:
+                seen.add(key)
+                unique_paths.append(item)
+
+        unique_paths.sort(key=lambda x: x[0], reverse=True)
+
+        # Replace paths with placeholders
+        for start, end, path in unique_paths:
+            # Skip if already obfuscated
+            if path in self.mappings.values():
+                continue
+
+            # Generate or reuse mapping
+            if path not in self.mappings:
+                placeholder = f"PATH{path_counter:03d}"
+                self.mappings[path] = placeholder
+                path_counter += 1
+            else:
+                placeholder = self.mappings[path]
+
+            text_content = text_content[:start] + placeholder + text_content[end:]
+
+        self.save_mappings()
+        self.text_area.delete(1.0, tk.END)
+        self.text_area.insert(1.0, text_content)
+        self.text_area.yview_moveto(scroll_position[0])
+        self.highlight_obfuscated_text()
+
+    def _action_remove_function_bodies(self):
+        """Action: Remove function/method bodies, keep only signatures (C#, JS, TS)"""
+        import re
+
+        # Save current scroll position
+        scroll_position = self.text_area.yview()
+
+        # Get current text content
+        text_content = self.text_area.get(1.0, "end-1c")
+
+        # Get next available BODY number
+        existing_nums = []
+        for mapped_value in self.mappings.values():
+            if mapped_value.startswith('BODY') and len(mapped_value) > 4:
+                try:
+                    num_part = mapped_value[4:]
+                    if num_part.isdigit():
+                        existing_nums.append(int(num_part))
+                except:
+                    pass
+        body_counter = max(existing_nums) + 1 if existing_nums else 1
+
+        def find_matching_brace(text, start_pos):
+            """Find the closing brace position"""
+            if start_pos >= len(text) or text[start_pos] != '{':
+                return -1
+
+            depth = 1
+            i = start_pos + 1
+
+            while i < len(text) and depth > 0:
+                char = text[i]
+                if char == '{':
+                    depth += 1
+                elif char == '}':
+                    depth -= 1
+                elif char == '"' or char == "'" or char == '`':
+                    # Skip string content
+                    quote = char
+                    i += 1
+                    while i < len(text):
+                        if text[i] == '\\' and i + 1 < len(text):
+                            i += 2
+                            continue
+                        if text[i] == quote:
+                            break
+                        i += 1
+                i += 1
+
+            return i - 1 if depth == 0 else -1
+
+        # Find all opening braces and check if they follow a function signature pattern
+        # Work character by character to find ")" followed by optional whitespace/type annotation then "{"
+
+        result = text_content
+        offset = 0  # Track position shifts due to replacements
+
+        # Find all potential function signatures: pattern is )...{ where ... is whitespace or return type hints
+        i = 0
+        while i < len(result):
+            # Find next opening brace
+            brace_pos = result.find('{', i)
+            if brace_pos == -1:
+                break
+
+            # Look backwards from brace to find if there's a ) before it (function signature)
+            # Check up to 200 chars back for the closing paren of signature
+            search_start = max(0, brace_pos - 200)
+            segment = result[search_start:brace_pos]
+
+            # Find the last ) in this segment
+            paren_pos = segment.rfind(')')
+
+            if paren_pos != -1:
+                # Check what's between ) and { - should be whitespace, type annotations, or keywords
+                between = segment[paren_pos + 1:]
+                # Allow: whitespace, :, type names, async, =>, where clauses
+                between_stripped = between.strip()
+
+                # Valid patterns between ) and {:
+                # - empty or whitespace only
+                # - : ReturnType (TypeScript)
+                # - where T : constraint (C#)
+                # - => (but not arrow function expression - those start with = before ()
+                is_valid_function = False
+
+                if not between_stripped:
+                    is_valid_function = True
+                elif re.match(r'^:\s*[\w<>\[\],\s\?|&]+$', between_stripped):
+                    # TypeScript return type
+                    is_valid_function = True
+                elif re.match(r'^where\s+', between_stripped):
+                    # C# generic constraint
+                    is_valid_function = True
+
+                if is_valid_function:
+                    # Now find the start of the signature (go back to find the line start or previous statement)
+                    # Find the start of this line
+                    line_start = result.rfind('\n', 0, search_start + paren_pos)
+                    if line_start == -1:
+                        line_start = 0
+                    else:
+                        line_start += 1
+
+                    # Get the full signature
+                    signature = result[line_start:brace_pos].rstrip()
+
+                    # Skip if this looks like a control structure (if, while, for, etc.)
+                    sig_stripped = signature.strip()
+                    control_keywords = ['if', 'else', 'while', 'for', 'foreach', 'switch', 'catch', 'finally', 'lock', 'using', 'try']
+                    is_control = False
+                    for kw in control_keywords:
+                        if sig_stripped == kw or sig_stripped.startswith(kw + ' ') or sig_stripped.startswith(kw + '('):
+                            is_control = True
+                            break
+
+                    # Also skip class/interface/struct/namespace/enum declarations
+                    declaration_keywords = ['class', 'interface', 'struct', 'namespace', 'enum', 'record']
+                    for kw in declaration_keywords:
+                        if kw + ' ' in sig_stripped or sig_stripped.endswith(kw):
+                            is_control = True
+                            break
+
+                    if not is_control:
+                        # Find matching closing brace
+                        close_pos = find_matching_brace(result, brace_pos)
+
+                        if close_pos != -1 and close_pos > brace_pos + 1:
+                            # Extract body content
+                            body_content = result[brace_pos + 1:close_pos].strip()
+
+                            # Skip if empty or already a placeholder
+                            if body_content and not re.match(r'^BODY\d+$', body_content):
+                                # Generate placeholder
+                                if body_content not in self.mappings:
+                                    placeholder = f"BODY{body_counter:03d}"
+                                    self.mappings[body_content] = placeholder
+                                    body_counter += 1
+                                else:
+                                    placeholder = self.mappings[body_content]
+
+                                # Replace body with placeholder
+                                new_block = f"{{ {placeholder} }}"
+                                result = result[:brace_pos] + new_block + result[close_pos + 1:]
+
+                                # Continue from after the replacement
+                                i = brace_pos + len(new_block)
+                                continue
+
+            i = brace_pos + 1
+
+        self.save_mappings()
+        self.text_area.delete(1.0, tk.END)
+        self.text_area.insert(1.0, result)
         self.text_area.yview_moveto(scroll_position[0])
         self.highlight_obfuscated_text()
 
