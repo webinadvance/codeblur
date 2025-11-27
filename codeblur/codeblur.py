@@ -35,6 +35,11 @@ class CodeBlur:
             "actions": ["obfuscate_strings", "obfuscate_guids", "obfuscate_paths"],
         },
         4: {
+            "name": "ANON",
+            "description": "Anonymize function names, property names, and field names",
+            "actions": ["anonymize_members"],
+        },
+        5: {
             "name": "SKELETON",
             "description": "Remove function/method bodies, keep only signatures",
             "actions": ["remove_function_bodies"],
@@ -676,8 +681,8 @@ class CodeBlur:
     def is_obfuscated_identifier(self, word):
         """Check if word matches our obfuscated identifier pattern (e.g., ENTITY001, PERSON042, GUID001)"""
         import re
-        # Match pattern: CATEGORY + NUMBERS (e.g., PERSON001, ENTITY042, ORG003, GUID001, COMMENT001, BODY001, PATH001)
-        categories = ['PERSON', 'ENTITY', 'ORG', 'ITEM', 'NAME', 'ID', 'REF', 'GUID', 'COMMENT', 'BODY', 'PATH']
+        # Match pattern: CATEGORY + NUMBERS (e.g., PERSON001, ENTITY042, ORG003, GUID001, COMMENT001, BODY001, PATH001, FUNC001, PROP001, FIELD001)
+        categories = ['PERSON', 'ENTITY', 'ORG', 'ITEM', 'NAME', 'ID', 'REF', 'GUID', 'COMMENT', 'BODY', 'PATH', 'FUNC', 'PROP', 'FIELD']
         pattern = r'^(' + '|'.join(categories) + r')\d+$'
         return bool(re.match(pattern, word))
 
@@ -1312,6 +1317,173 @@ class CodeBlur:
                 placeholder = self.mappings[path]
 
             text_content = text_content[:start] + placeholder + text_content[end:]
+
+        self.save_mappings()
+        self.text_area.delete(1.0, tk.END)
+        self.text_area.insert(1.0, text_content)
+        self.text_area.yview_moveto(scroll_position[0])
+        self.highlight_obfuscated_text()
+
+    def _action_anonymize_members(self):
+        """Action: Anonymize function names, property names, and field names (C#, TS)"""
+        import re
+
+        # Save current scroll position
+        scroll_position = self.text_area.yview()
+
+        # Get current text content
+        text_content = self.text_area.get(1.0, "end-1c")
+
+        # Get next numbers for each category
+        def get_next_num(prefix):
+            existing_nums = []
+            for mapped_value in self.mappings.values():
+                if mapped_value.startswith(prefix) and len(mapped_value) > len(prefix):
+                    try:
+                        num_part = mapped_value[len(prefix):]
+                        if num_part.isdigit():
+                            existing_nums.append(int(num_part))
+                    except:
+                        pass
+            return max(existing_nums) + 1 if existing_nums else 1
+
+        func_counter = get_next_num('FUNC')
+        prop_counter = get_next_num('PROP')
+        field_counter = get_next_num('FIELD')
+
+        # Track replacements to do them all at once
+        replacements = {}  # name -> placeholder
+
+        # C# method patterns:
+        # public void MethodName(...)
+        # private async Task<T> MethodName(...)
+        # protected override string MethodName(...)
+        # internal static int MethodName(...)
+        cs_method_pattern = r'(?:public|private|protected|internal)\s+(?:static\s+)?(?:virtual\s+)?(?:override\s+)?(?:abstract\s+)?(?:sealed\s+)?(?:async\s+)?(?:[\w<>\[\],\?\s]+\s+)(\w+)\s*(?:<[^>]+>)?\s*\('
+
+        # C# property patterns:
+        # public string PropertyName { get; set; }
+        # private int PropertyName => value;
+        # public List<T> PropertyName { get; }
+        cs_property_pattern = r'(?:public|private|protected|internal)\s+(?:static\s+)?(?:virtual\s+)?(?:override\s+)?(?:abstract\s+)?(?:[\w<>\[\],\?\s]+\s+)(\w+)\s*(?:\{|=>)'
+
+        # C# field patterns:
+        # private readonly string _fieldName;
+        # public static int FieldName = 0;
+        # private ILogger<T> _logger;
+        cs_field_pattern = r'(?:public|private|protected|internal)\s+(?:static\s+)?(?:readonly\s+)?(?:const\s+)?(?:[\w<>\[\],\?\s]+\s+)(\w+)\s*[;=]'
+
+        # TypeScript/JavaScript method patterns:
+        # async methodName(...)
+        # public methodName(...)
+        # private static methodName(...)
+        ts_method_pattern = r'(?:public|private|protected)?\s*(?:static\s+)?(?:async\s+)?(\w+)\s*\([^)]*\)\s*(?::\s*[^{]+)?\s*\{'
+
+        # TypeScript property patterns:
+        # public propertyName: Type;
+        # private propertyName = value;
+        # readonly propertyName: Type;
+        ts_property_pattern = r'(?:public|private|protected)?\s*(?:static\s+)?(?:readonly\s+)?(\w+)\s*[:\?]\s*[\w<>\[\]|&\s]+'
+
+        # Skip these common names that shouldn't be anonymized
+        skip_names = {
+            'constructor', 'get', 'set', 'async', 'await', 'return', 'if', 'else',
+            'for', 'while', 'switch', 'case', 'break', 'continue', 'try', 'catch',
+            'finally', 'throw', 'new', 'this', 'super', 'class', 'interface',
+            'extends', 'implements', 'import', 'export', 'default', 'from',
+            'const', 'let', 'var', 'function', 'void', 'null', 'undefined',
+            'true', 'false', 'string', 'number', 'boolean', 'object', 'any',
+            'never', 'unknown', 'readonly', 'static', 'public', 'private',
+            'protected', 'abstract', 'override', 'virtual', 'sealed', 'partial',
+            'internal', 'extern', 'volatile', 'unsafe', 'fixed', 'sizeof',
+            'typeof', 'nameof', 'is', 'as', 'in', 'out', 'ref', 'params',
+            'Main', 'ToString', 'Equals', 'GetHashCode', 'Dispose', 'Configure',
+            'ConfigureServices', 'Build', 'Run', 'CreateBuilder', 'AddScoped',
+            'AddSingleton', 'AddTransient', 'UseRouting', 'UseEndpoints',
+            'MapControllers', 'MapGet', 'MapPost', 'MapPut', 'MapDelete',
+            'OnConnectedAsync', 'OnDisconnectedAsync', 'SendAsync', 'InvokeAsync',
+            'Task', 'Action', 'Func', 'ILogger', 'IConfiguration', 'IServiceCollection',
+            'DbContext', 'DbSet', 'Entity', 'Key', 'Required', 'MaxLength',
+            'length', 'push', 'pop', 'map', 'filter', 'reduce', 'forEach',
+            'find', 'findIndex', 'includes', 'indexOf', 'slice', 'splice',
+            'concat', 'join', 'split', 'trim', 'toLowerCase', 'toUpperCase',
+            'toString', 'valueOf', 'hasOwnProperty', 'prototype', 'apply',
+            'call', 'bind', 'then', 'catch', 'finally', 'resolve', 'reject',
+            'Promise', 'Observable', 'Subject', 'subscribe', 'unsubscribe',
+            'next', 'error', 'complete', 'pipe', 'tap', 'switchMap', 'mergeMap',
+            'useState', 'useEffect', 'useContext', 'useReducer', 'useCallback',
+            'useMemo', 'useRef', 'useLayoutEffect', 'render', 'componentDidMount',
+            'componentWillUnmount', 'componentDidUpdate', 'setState', 'props',
+            'state', 'context', 'children', 'key', 'ref', 'value', 'onChange',
+            'onClick', 'onSubmit', 'onError', 'onSuccess', 'onComplete',
+        }
+
+        # Also skip already obfuscated identifiers
+        def should_skip(name):
+            if name in skip_names:
+                return True
+            if self.is_obfuscated_identifier(name):
+                return True
+            if name in self.mappings.values():
+                return True
+            # Skip names that are all uppercase (constants)
+            if name.isupper() and len(name) > 1:
+                return True
+            # Skip single character names
+            if len(name) <= 1:
+                return True
+            # Skip names starting with underscore followed by lowercase (private convention)
+            # but still anonymize them
+            return False
+
+        # Find C# methods
+        for match in re.finditer(cs_method_pattern, text_content):
+            name = match.group(1)
+            if not should_skip(name) and name not in replacements:
+                replacements[name] = ('FUNC', func_counter)
+                func_counter += 1
+
+        # Find C# properties (but not methods - check no '(' after)
+        for match in re.finditer(cs_property_pattern, text_content):
+            name = match.group(1)
+            # Make sure this isn't a method (no opening paren)
+            end_pos = match.end()
+            if end_pos < len(text_content) and text_content[end_pos-1] != '(':
+                if not should_skip(name) and name not in replacements:
+                    replacements[name] = ('PROP', prop_counter)
+                    prop_counter += 1
+
+        # Find C# fields
+        for match in re.finditer(cs_field_pattern, text_content):
+            name = match.group(1)
+            # Skip if it looks like a property or method (already captured)
+            if not should_skip(name) and name not in replacements:
+                # Check if this is followed by { (property) or ( (method)
+                remaining = text_content[match.end()-1:match.end()+5]
+                if not remaining.startswith('{') and not remaining.startswith('('):
+                    replacements[name] = ('FIELD', field_counter)
+                    field_counter += 1
+
+        # Find TS methods (in class context - has { after )
+        for match in re.finditer(ts_method_pattern, text_content):
+            name = match.group(1)
+            if not should_skip(name) and name not in replacements:
+                replacements[name] = ('FUNC', func_counter)
+                func_counter += 1
+
+        if not replacements:
+            return
+
+        # Create actual mappings and replace
+        for name, (prefix, num) in replacements.items():
+            placeholder = f"{prefix}{num:03d}"
+            self.mappings[name] = placeholder
+
+        # Replace all occurrences (whole word only)
+        for name, (prefix, num) in replacements.items():
+            placeholder = self.mappings[name]
+            # Use word boundary to replace only whole words
+            text_content = re.sub(r'\b' + re.escape(name) + r'\b', placeholder, text_content)
 
         self.save_mappings()
         self.text_area.delete(1.0, tk.END)
