@@ -5,12 +5,47 @@ import json
 import os
 import random
 import string
+import threading
 
 class CodeBlur:
+    # =========================================================================
+    # OBFUSCATION LEVELS CONFIGURATION
+    # =========================================================================
+    # Each level defines what actions to perform when AUTO-OBFUSCATE is clicked.
+    # Levels are cumulative - clicking again advances to the next level.
+    # After all levels are done, clicking again resets to level 0 (no action).
+    #
+    # To add a new level: add an entry here and implement the action method.
+    # Action methods must exist as instance methods (e.g., self._action_obfuscate_identifiers)
+    # =========================================================================
+    OBFUSCATION_LEVELS = {
+        1: {
+            "name": "BLUR",
+            "description": "Obfuscate unknown identifiers (variables, functions, classes)",
+            "actions": ["obfuscate_identifiers"],
+        },
+        2: {
+            "name": "STEALTH",
+            "description": "Replace comments with placeholders and collapse empty lines",
+            "actions": ["remove_comments", "remove_empty_lines"],
+        },
+        3: {
+            "name": "PHANTOM",
+            "description": "Obfuscate string contents and GUIDs",
+            "actions": ["obfuscate_strings", "obfuscate_guids"],
+        },
+    }
+
     def __init__(self, root):
         self.root = root
         self.root.title("CODEBLUR")
         self.root.geometry("900x700")
+
+        # Track current obfuscation level (0 = not started)
+        self.current_obfuscation_level = 0
+
+        # Loading state for async obfuscation
+        self.is_obfuscating = False
 
         # Neubrutalist monochrome with blue accent color scheme
         self.bg_color = "#FFFFFF"
@@ -31,16 +66,25 @@ class CodeBlur:
         self.mappings_file = os.path.join(self.app_data_dir, "obfuscation_mappings.json")
         self.mappings = self.load_mappings()
 
-        # Known words dictionary (language-agnostic)
-        # Default known_words.json is in the package directory
-        package_dir = os.path.dirname(os.path.abspath(__file__))
-        self.default_known_words_file = os.path.join(package_dir, "known_words.json")
-        # User can customize in app data dir
-        self.known_words_file = os.path.join(self.app_data_dir, "known_words.json")
-        self.known_words = self.load_known_words()
 
-        # State tracking for 2-state button
-        self.clear_button_armed = False
+        # Known words dictionary (language-agnostic)
+        # Multiple word files are merged together
+        package_dir = os.path.dirname(os.path.abspath(__file__))
+
+        # Array of word files to load and merge (in package directory)
+        self.word_files = [
+            os.path.join(package_dir, "known_words.json"),      # Common programming words
+            os.path.join(package_dir, "brand_words.json"),      # Brand/IT company names
+            os.path.join(package_dir, "package_words.json"),    # NuGet/npm package names
+        ]
+
+        # User can also add custom words in app data dir
+        self.user_words_file = os.path.join(self.app_data_dir, "custom_words.json")
+
+        self.known_words = self.load_all_known_words()
+
+        # State tracking for 3-state button (CLEAR -> CONFIRM -> CLOSE)
+        self.clear_button_state = 0  # 0=clear, 1=confirm, 2=close
         self.clear_button = None
 
         # Undo history - stores (text_content, mappings) tuples
@@ -82,31 +126,34 @@ class CodeBlur:
         with open(self.mappings_file, 'w', encoding='utf-8') as f:
             json.dump(self.mappings, f, indent=2, ensure_ascii=False)
 
-    def load_known_words(self):
-        """Load known words dictionary from JSON file"""
-        # If user has customized file, use it
-        if os.path.exists(self.known_words_file):
+    def load_all_known_words(self):
+        """Load and merge all known words from multiple files"""
+        all_words = set()
+
+        # Load from each word file in the array
+        for word_file in self.word_files:
+            if os.path.exists(word_file):
+                try:
+                    with open(word_file, 'r', encoding='utf-8') as f:
+                        words = json.load(f)
+                        all_words.update(words)
+                except:
+                    pass
+
+        # Load user's custom words if exists
+        if os.path.exists(self.user_words_file):
             try:
-                with open(self.known_words_file, 'r', encoding='utf-8') as f:
-                    return set(json.load(f))
+                with open(self.user_words_file, 'r', encoding='utf-8') as f:
+                    words = json.load(f)
+                    all_words.update(words)
             except:
                 pass
 
-        # Try to load from package default
-        if os.path.exists(self.default_known_words_file):
-            try:
-                with open(self.default_known_words_file, 'r', encoding='utf-8') as f:
-                    words = set(json.load(f))
-                # Copy to user dir for customization
-                self.save_known_words_to_file(words)
-                return words
-            except:
-                pass
+        # If no words loaded, use hardcoded defaults
+        if not all_words:
+            all_words = self.get_default_known_words()
 
-        # Fallback to hardcoded defaults
-        words = self.get_default_known_words()
-        self.save_known_words_to_file(words)
-        return words
+        return all_words
 
     def get_default_known_words(self):
         """Return default set of known words (generic, language-agnostic)"""
@@ -150,15 +197,6 @@ class CodeBlur:
             "function", "class", "const", "let", "var",
             "import", "export", "default", "require",
         }
-
-    def save_known_words(self):
-        """Save current known words to JSON file"""
-        self.save_known_words_to_file(self.known_words)
-
-    def save_known_words_to_file(self, words):
-        """Save known words set to JSON file (sorted for easy editing)"""
-        with open(self.known_words_file, 'w', encoding='utf-8') as f:
-            json.dump(sorted(list(words)), f, indent=2, ensure_ascii=False)
 
     def generate_ai_identifier(self, original_word):
         """Generate AI-like identifier for anonymization"""
@@ -230,8 +268,8 @@ class CodeBlur:
         btn2 = self.create_neubrutalist_button(row1, "COPY AND CLOSE", self.copy_and_close, self.accent_color)
         btn2.pack(side=tk.LEFT, padx=4)
 
-        btn_obf = self.create_neubrutalist_button(row1, "AUTO-OBFUSCATE", self.obfuscate_all, "#FF6600")
-        btn_obf.pack(side=tk.LEFT, padx=4)
+        self.obfuscate_button = self.create_neubrutalist_button(row1, "BLUR", self.obfuscate_all, "#FF6600")
+        self.obfuscate_button.pack(side=tk.LEFT, padx=4)
 
         btn5 = self.create_neubrutalist_button(row1, "DEOBFUSCATE", self.deobfuscate_and_show, "#00CC00")
         btn5.pack(side=tk.LEFT, padx=4)
@@ -366,19 +404,65 @@ class CodeBlur:
                 self.text_area.delete(1.0, tk.END)
                 self.text_area.insert(1.0, clipboard_text)
                 self.apply_existing_mappings()
+                # Always start at level 0
+                self.reset_obfuscation_level()
         except Exception as e:
             pass
 
     def apply_existing_mappings(self):
-        """Apply existing mappings to the loaded text"""
+        """Apply existing mappings to the loaded text (camelCase-aware)"""
+        import re
         text_content = self.text_area.get(1.0, "end-1c")
 
-        for original, obfuscated in self.mappings.items():
-            text_content = text_content.replace(original, obfuscated)
+        # Find all identifiers and apply mappings through camelCase splitting
+        identifier_pattern = r'\b[a-zA-Z_][a-zA-Z0-9_]*\b'
+
+        def replace_with_mappings(match):
+            word = match.group(0)
+            return self.apply_mappings_to_word(word)
+
+        text_content = re.sub(identifier_pattern, replace_with_mappings, text_content)
 
         self.text_area.delete(1.0, tk.END)
         self.text_area.insert(1.0, text_content)
         self.highlight_obfuscated_text()
+
+    def apply_mappings_to_word(self, word):
+        """Apply existing mappings to a word (camelCase-aware, no new mappings created)"""
+        # Check if whole word is already obfuscated
+        if word in self.mappings.values():
+            return word
+
+        # Check if whole word has a mapping
+        if word in self.mappings:
+            return self.mappings[word]
+
+        # Check if it's an obfuscated identifier pattern
+        if self.is_obfuscated_identifier(word):
+            return word
+
+        # Split into camelCase parts
+        parts = self.split_camel_case(word)
+
+        if len(parts) <= 1:
+            # Single word - check if it has a mapping
+            if word in self.mappings:
+                return self.mappings[word]
+            return word
+
+        # Process composite word - apply existing mappings to parts
+        result_parts = []
+        for part in parts:
+            if self.is_obfuscated_identifier(part):
+                result_parts.append(part)
+            elif part.isdigit():
+                result_parts.append(part)
+            elif part in self.mappings:
+                result_parts.append(self.mappings[part])
+            else:
+                result_parts.append(part)
+
+        return ''.join(result_parts)
 
     def highlight_obfuscated_text(self):
         """Highlight all obfuscated text in the text area"""
@@ -584,8 +668,24 @@ class CodeBlur:
         parts = re.findall(r'[A-Z]?[a-z]+|[A-Z]+(?=[A-Z][a-z]|\d|\W|$)|\d+', word)
         return parts if parts else [word]
 
+    def is_obfuscated_identifier(self, word):
+        """Check if word matches our obfuscated identifier pattern (e.g., ENTITY001, PERSON042, GUID001)"""
+        import re
+        # Match pattern: CATEGORY + NUMBERS (e.g., PERSON001, ENTITY042, ORG003, GUID001, COMMENT001)
+        categories = ['PERSON', 'ENTITY', 'ORG', 'ITEM', 'NAME', 'ID', 'REF', 'GUID', 'COMMENT']
+        pattern = r'^(' + '|'.join(categories) + r')\d+$'
+        return bool(re.match(pattern, word))
+
     def auto_obfuscate_word(self, word):
         """Obfuscate a single word for auto-obfuscate, preserving known parts"""
+        # Check if word matches our obfuscated identifier pattern (idempotent)
+        if self.is_obfuscated_identifier(word):
+            return word
+
+        # Check if word is already an obfuscated value (idempotent - don't re-obfuscate)
+        if word in self.mappings.values():
+            return word
+
         # Check if the whole word is known (case-insensitive check)
         if word in self.known_words or word.lower() in {w.lower() for w in self.known_words}:
             return word
@@ -605,6 +705,32 @@ class CodeBlur:
         unknown_sequence = []
 
         for part in parts:
+            # Check if this part is an obfuscated identifier (e.g., ENTITY001)
+            if self.is_obfuscated_identifier(part):
+                # Flush any unknown sequence first
+                if unknown_sequence:
+                    unknown_combined = ''.join(unknown_sequence)
+                    if unknown_combined not in self.mappings:
+                        identifier = self.generate_ai_identifier(unknown_combined)
+                        self.mappings[unknown_combined] = identifier
+                    result_parts.append(self.mappings[unknown_combined])
+                    unknown_sequence = []
+                result_parts.append(part)
+                continue
+
+            # Check if this part is pure digits (part of obfuscated identifier like "001" in "ID001")
+            if part.isdigit():
+                # Flush any unknown sequence first
+                if unknown_sequence:
+                    unknown_combined = ''.join(unknown_sequence)
+                    if unknown_combined not in self.mappings:
+                        identifier = self.generate_ai_identifier(unknown_combined)
+                        self.mappings[unknown_combined] = identifier
+                    result_parts.append(self.mappings[unknown_combined])
+                    unknown_sequence = []
+                result_parts.append(part)
+                continue
+
             # Check if this part is known (case-insensitive)
             is_known = part in self.known_words or part.lower() in {w.lower() for w in self.known_words}
 
@@ -632,11 +758,91 @@ class CodeBlur:
         return ''.join(result_parts)
 
     def obfuscate_all(self):
-        """Obfuscate all unknown words, keep known ones"""
-        import re
+        """Execute next obfuscation level (each level is idempotent) - async"""
+        # Prevent multiple clicks while processing
+        if self.is_obfuscating:
+            return
+
+        self.is_obfuscating = True
+        max_level = max(self.OBFUSCATION_LEVELS.keys())
+
+        # Advance to next level (cycle back to 1 if at max)
+        self.current_obfuscation_level += 1
+        if self.current_obfuscation_level > max_level:
+            self.current_obfuscation_level = 1
+
+        # Disable button while processing
+        self.set_obfuscate_button_enabled(False)
 
         # Save state before making changes
         self.save_state()
+
+        # Run obfuscation in background thread
+        def do_obfuscation():
+            level_config = self.OBFUSCATION_LEVELS[self.current_obfuscation_level]
+            for action_name in level_config["actions"]:
+                action_method = getattr(self, f"_action_{action_name}", None)
+                if action_method:
+                    action_method()
+
+            # Schedule UI update on main thread
+            self.root.after(0, self.on_obfuscation_complete)
+
+        thread = threading.Thread(target=do_obfuscation, daemon=True)
+        thread.start()
+
+    def on_obfuscation_complete(self):
+        """Called when obfuscation is done - update UI"""
+        self.is_obfuscating = False
+
+        # Copy result to clipboard
+        text_content = self.text_area.get(1.0, "end-1c")
+        if text_content:
+            pyperclip.copy(text_content)
+
+        # Re-enable and update button text
+        self.set_obfuscate_button_enabled(True)
+        self.update_obfuscate_button_text()
+
+    def set_obfuscate_button_enabled(self, enabled):
+        """Enable or disable the obfuscate button"""
+        for widget in self.obfuscate_button.winfo_children():
+            if isinstance(widget, tk.Button):
+                if enabled:
+                    widget.config(state=tk.NORMAL, bg="#FF6600")
+                else:
+                    widget.config(state=tk.DISABLED, bg="#CCCCCC")
+                break
+
+    def update_obfuscate_button_text(self):
+        """Update AUTO-OBFUSCATE button to show current level"""
+        # Find the actual button widget inside the shadow frame
+        for widget in self.obfuscate_button.winfo_children():
+            if isinstance(widget, tk.Button):
+                # Always show next level name (level 0 shows level 1 name)
+                next_level = self.current_obfuscation_level + 1
+                max_level = max(self.OBFUSCATION_LEVELS.keys())
+                if next_level > max_level:
+                    next_level = 1
+                level_name = self.OBFUSCATION_LEVELS[next_level]["name"]
+                widget.config(text=level_name)
+                break
+
+    def reset_obfuscation_level(self):
+        """Reset obfuscation level to 0"""
+        self.current_obfuscation_level = 0
+        self.update_obfuscate_button_text()
+
+    # =========================================================================
+    # OBFUSCATION LEVEL ACTIONS
+    # =========================================================================
+    # Each action method must be named _action_<action_name> where action_name
+    # matches what's in OBFUSCATION_LEVELS config.
+    # =========================================================================
+
+    def _action_obfuscate_identifiers(self):
+        """Action: Obfuscate all unknown identifiers"""
+        import re
 
         # Save current scroll position
         scroll_position = self.text_area.yview()
@@ -665,6 +871,320 @@ class CodeBlur:
         self.text_area.yview_moveto(scroll_position[0])
 
         # Highlight obfuscated text
+        self.highlight_obfuscated_text()
+
+    def _action_remove_comments(self):
+        """Action: Replace all comments with placeholders (can be deobfuscated)"""
+        import re
+
+        # Save current scroll position
+        scroll_position = self.text_area.yview()
+
+        # Get current text content
+        text_content = self.text_area.get(1.0, "end-1c")
+
+        # Collect all comments with their positions
+        # Order matters: check multi-line before single-line to avoid partial matches
+        comments_to_replace = []
+
+        # Multi-line comments /* ... */ (C, C++, C#, Java, JS, Go, Rust, etc.)
+        for match in re.finditer(r'/\*.*?\*/', text_content, flags=re.DOTALL):
+            comments_to_replace.append((match.start(), match.end(), match.group(0)))
+
+        # XML/HTML comments <!-- ... -->
+        for match in re.finditer(r'<!--.*?-->', text_content, flags=re.DOTALL):
+            comments_to_replace.append((match.start(), match.end(), match.group(0)))
+
+        # Lua multi-line comments --[[ ... ]]
+        for match in re.finditer(r'--\[\[.*?\]\]', text_content, flags=re.DOTALL):
+            comments_to_replace.append((match.start(), match.end(), match.group(0)))
+
+        # C# XML documentation comments /// (must check before //)
+        for match in re.finditer(r'///[^\n]*', text_content):
+            # Check not already covered by multi-line
+            if not any(s <= match.start() < e for s, e, _ in comments_to_replace):
+                comments_to_replace.append((match.start(), match.end(), match.group(0)))
+
+        # Single-line comments // (C, C++, C#, Java, JS, Go, Rust, etc.)
+        for match in re.finditer(r'//[^\n]*', text_content):
+            # Check not already covered
+            if not any(s <= match.start() < e for s, e, _ in comments_to_replace):
+                comments_to_replace.append((match.start(), match.end(), match.group(0)))
+
+        # Python/Shell/Ruby comments #
+        # Be careful: # in C# is preprocessor, but usually at line start
+        for match in re.finditer(r'#[^\n]*', text_content):
+            if not any(s <= match.start() < e for s, e, _ in comments_to_replace):
+                comments_to_replace.append((match.start(), match.end(), match.group(0)))
+
+        # SQL single-line comments -- (but not --[[ which is Lua)
+        for match in re.finditer(r'--(?!\[\[)[^\n]*', text_content):
+            if not any(s <= match.start() < e for s, e, _ in comments_to_replace):
+                comments_to_replace.append((match.start(), match.end(), match.group(0)))
+
+        if not comments_to_replace:
+            return
+
+        # Sort by position (reverse to avoid position shifts)
+        comments_to_replace.sort(key=lambda x: x[0], reverse=True)
+
+        # Replace each comment with placeholder
+        for start, end, comment_text in comments_to_replace:
+            # Skip if already a placeholder
+            if re.match(r'^/\*\s*COMMENT\d+\s*\*/$', comment_text):
+                continue
+            if re.match(r'^//\s*COMMENT\d+\s*$', comment_text):
+                continue
+            if re.match(r'^#\s*COMMENT\d+\s*$', comment_text):
+                continue
+            if re.match(r'^///\s*COMMENT\d+\s*$', comment_text):
+                continue
+            if re.match(r'^--\s*COMMENT\d+\s*$', comment_text):
+                continue
+            if re.match(r'^<!--\s*COMMENT\d+\s*-->$', comment_text):
+                continue
+
+            # Extract just the content (without comment markers)
+            # This way deobfuscate replaces COMMENT001 with just the content
+            if comment_text.startswith('/*') and comment_text.endswith('*/'):
+                comment_content = comment_text[2:-2].strip()
+                comment_style = 'block'
+            elif comment_text.startswith('<!--') and comment_text.endswith('-->'):
+                comment_content = comment_text[4:-3].strip()
+                comment_style = 'html'
+            elif comment_text.startswith('--[[') and comment_text.endswith(']]'):
+                comment_content = comment_text[4:-2].strip()
+                comment_style = 'lua'
+            elif comment_text.startswith('///'):
+                comment_content = comment_text[3:].strip()
+                comment_style = 'xmldoc'
+            elif comment_text.startswith('//'):
+                comment_content = comment_text[2:].strip()
+                comment_style = 'line'
+            elif comment_text.startswith('#'):
+                comment_content = comment_text[1:].strip()
+                comment_style = 'hash'
+            elif comment_text.startswith('--'):
+                comment_content = comment_text[2:].strip()
+                comment_style = 'sql'
+            else:
+                comment_content = comment_text
+                comment_style = 'block'
+
+            # Skip empty comments
+            if not comment_content:
+                continue
+
+            # Skip if content already mapped
+            if comment_content in self.mappings.values():
+                continue
+
+            # Generate or reuse mapping for the CONTENT only
+            if comment_content not in self.mappings:
+                existing_nums = []
+                for mapped_value in self.mappings.values():
+                    if mapped_value.startswith('COMMENT') and len(mapped_value) > 7:
+                        try:
+                            num_part = mapped_value[7:]
+                            if num_part.isdigit():
+                                existing_nums.append(int(num_part))
+                        except:
+                            pass
+                next_num = max(existing_nums) + 1 if existing_nums else 1
+                placeholder = f"COMMENT{next_num:03d}"
+                self.mappings[comment_content] = placeholder
+
+            placeholder = self.mappings[comment_content]
+
+            # Determine comment style for placeholder
+            if comment_style == 'block':
+                replacement = f"/* {placeholder} */"
+            elif comment_style == 'html':
+                replacement = f"<!-- {placeholder} -->"
+            elif comment_style == 'lua':
+                replacement = f"--[[ {placeholder} ]]"
+            elif comment_style == 'xmldoc':
+                replacement = f"/// {placeholder}"
+            elif comment_style == 'line':
+                replacement = f"// {placeholder}"
+            elif comment_style == 'hash':
+                replacement = f"# {placeholder}"
+            elif comment_style == 'sql':
+                replacement = f"-- {placeholder}"
+            else:
+                replacement = f"/* {placeholder} */"
+
+            text_content = text_content[:start] + replacement + text_content[end:]
+
+        self.save_mappings()
+        self.text_area.delete(1.0, tk.END)
+        self.text_area.insert(1.0, text_content)
+        self.text_area.yview_moveto(scroll_position[0])
+        self.highlight_obfuscated_text()
+
+    def _action_remove_empty_lines(self):
+        """Action: Remove excessive empty lines and whitespace-only lines"""
+        import re
+
+        # Save current scroll position
+        scroll_position = self.text_area.yview()
+
+        # Get current text content
+        text_content = self.text_area.get(1.0, "end-1c")
+
+        # Remove lines that are only whitespace
+        lines = text_content.split('\n')
+        cleaned_lines = []
+        for line in lines:
+            stripped = line.rstrip()
+            if stripped:
+                cleaned_lines.append(stripped)
+            elif cleaned_lines and cleaned_lines[-1]:
+                # Preserve single blank line between code blocks
+                cleaned_lines.append('')
+
+        text_content = '\n'.join(cleaned_lines)
+
+        # Remove excessive blank lines (more than 1 consecutive)
+        text_content = re.sub(r'\n\s*\n\s*\n+', '\n\n', text_content)
+
+        # Remove trailing empty lines
+        text_content = text_content.rstrip('\n')
+
+        # Update text area
+        self.text_area.delete(1.0, tk.END)
+        self.text_area.insert(1.0, text_content)
+
+        # Restore scroll position
+        self.text_area.yview_moveto(scroll_position[0])
+
+        # Re-highlight obfuscated text if any
+        self.highlight_obfuscated_text()
+
+    def _action_obfuscate_strings(self):
+        """Action: Obfuscate string contents"""
+        import re
+
+        # Save current scroll position
+        scroll_position = self.text_area.yview()
+
+        # Get current text content
+        text_content = self.text_area.get(1.0, "end-1c")
+
+        # Find all comment regions to exclude from obfuscation
+        comment_ranges = []
+        for match in re.finditer(r'/\*.*?\*/', text_content, re.DOTALL):
+            comment_ranges.append((match.start(), match.end()))
+        for match in re.finditer(r'//[^\n]*', text_content):
+            comment_ranges.append((match.start(), match.end()))
+        for match in re.finditer(r'#[^\n]*', text_content):
+            comment_ranges.append((match.start(), match.end()))
+
+        def is_in_comment(pos):
+            return any(start <= pos < end for start, end in comment_ranges)
+
+        def has_interpolation(content):
+            return '{' in content and '}' in content
+
+        # Find strings (double and single quotes)
+        double_quote_pattern = r'"(?:[^"\\\n\r]|\\[^\n\r])*"'
+        single_quote_pattern = r"'(?:[^'\\\n\r]|\\[^\n\r])*'"
+
+        strings_to_replace = []
+
+        for match in re.finditer(double_quote_pattern, text_content):
+            if is_in_comment(match.start()):
+                continue
+            full_string = match.group(0)
+            string_content = full_string[1:-1]
+            if (string_content and
+                not any(string_content == obf for obf in self.mappings.values()) and
+                not has_interpolation(string_content)):
+                strings_to_replace.append((match.start(), match.end(), full_string, string_content, '"'))
+
+        for match in re.finditer(single_quote_pattern, text_content):
+            if is_in_comment(match.start()):
+                continue
+            full_string = match.group(0)
+            string_content = full_string[1:-1]
+            if (string_content and
+                not any(string_content == obf for obf in self.mappings.values()) and
+                not has_interpolation(string_content)):
+                strings_to_replace.append((match.start(), match.end(), full_string, string_content, "'"))
+
+        if not strings_to_replace:
+            return
+
+        # Sort by position (reverse to avoid position shifts)
+        strings_to_replace.sort(key=lambda x: x[0], reverse=True)
+
+        for start, end, full_string, string_content, quote_char in strings_to_replace:
+            if string_content not in self.mappings:
+                identifier = self.generate_ai_identifier(string_content)
+                self.mappings[string_content] = identifier
+            else:
+                identifier = self.mappings[string_content]
+            new_string = f"{quote_char}{identifier}{quote_char}"
+            text_content = text_content[:start] + new_string + text_content[end:]
+
+        self.save_mappings()
+        self.text_area.delete(1.0, tk.END)
+        self.text_area.insert(1.0, text_content)
+        self.text_area.yview_moveto(scroll_position[0])
+        self.highlight_obfuscated_text()
+
+    def _action_obfuscate_guids(self):
+        """Action: Obfuscate GUIDs/UUIDs with placeholders"""
+        import re
+
+        # Save current scroll position
+        scroll_position = self.text_area.yview()
+
+        # Get current text content
+        text_content = self.text_area.get(1.0, "end-1c")
+
+        # GUID patterns:
+        # Standard: xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
+        # With braces: {xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx}
+        # Without dashes: xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx (32 hex chars)
+        guid_pattern = r'\{?[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\}?'
+
+        guids_found = list(re.finditer(guid_pattern, text_content))
+
+        if not guids_found:
+            return
+
+        # Process in reverse order to avoid position shifts
+        for match in reversed(guids_found):
+            guid = match.group(0)
+
+            # Skip if already obfuscated (is a placeholder)
+            if guid in self.mappings.values():
+                continue
+
+            # Generate or reuse mapping
+            if guid not in self.mappings:
+                # Generate GUID placeholder like GUID001, GUID002
+                existing_nums = []
+                for mapped_value in self.mappings.values():
+                    if mapped_value.startswith('GUID') and len(mapped_value) > 4:
+                        try:
+                            num_part = mapped_value[4:]
+                            if num_part.isdigit():
+                                existing_nums.append(int(num_part))
+                        except:
+                            pass
+                next_num = max(existing_nums) + 1 if existing_nums else 1
+                placeholder = f"GUID{next_num:03d}"
+                self.mappings[guid] = placeholder
+
+            placeholder = self.mappings[guid]
+            text_content = text_content[:match.start()] + placeholder + text_content[match.end():]
+
+        self.save_mappings()
+        self.text_area.delete(1.0, tk.END)
+        self.text_area.insert(1.0, text_content)
+        self.text_area.yview_moveto(scroll_position[0])
         self.highlight_obfuscated_text()
 
     def remove_all_comments(self):
@@ -798,6 +1318,9 @@ class CodeBlur:
         # Clear highlights since text is now deobfuscated
         self.text_area.tag_remove("obfuscated", "1.0", tk.END)
 
+        # Reset obfuscation level
+        self.reset_obfuscation_level()
+
         # Update clear button
         self.update_clear_button_text()
 
@@ -815,18 +1338,23 @@ class CodeBlur:
         self.root.destroy()
 
     def clear_mappings_2state(self):
-        """2-state button: first click arms, second click executes"""
-        if not self.clear_button_armed:
-            # First click - arm the button
-            self.clear_button_armed = True
-            # Change button appearance to show armed state
-            self.update_clear_button_text("CONFIRM CLEAR?")
+        """3-state button: CLEAR -> CONFIRM -> CLOSE"""
+        if self.clear_button_state == 0:
+            # First click - show confirm
+            self.clear_button_state = 1
+            self.update_clear_button_text("CONFIRM?")
+            # Reset after 3 seconds if not clicked again
+            self.root.after(3000, self.reset_clear_button)
+        elif self.clear_button_state == 1:
+            # Second click - execute clear
+            self.clear_mappings()
+            self.clear_button_state = 2
+            self.update_clear_button_text("CLOSE")
             # Reset after 3 seconds if not clicked again
             self.root.after(3000, self.reset_clear_button)
         else:
-            # Second click - execute clear
-            self.clear_mappings()
-            self.reset_clear_button()
+            # Third click - close app
+            self.root.destroy()
 
     def update_clear_button_text(self, text=None):
         """Update the clear button text"""
@@ -836,13 +1364,17 @@ class CodeBlur:
                 if text is None:
                     # Default: show count
                     widget.config(text=f"CLEAR ({len(self.mappings)})", bg=self.secondary_color)
+                elif text == "CONFIRM?":
+                    widget.config(text=text, bg="#FF0000")
+                elif text == "CLOSE":
+                    widget.config(text=text, bg="#FF6600")
                 else:
-                    widget.config(text=text, bg="#FF0000" if "CONFIRM" in text else self.secondary_color)
+                    widget.config(text=text, bg=self.secondary_color)
                 break
 
     def reset_clear_button(self):
         """Reset clear button to initial state"""
-        self.clear_button_armed = False
+        self.clear_button_state = 0
         self.update_clear_button_text()
 
     def clear_mappings(self):
@@ -873,6 +1405,9 @@ class CodeBlur:
 
         # Clear highlights
         self.text_area.tag_remove("obfuscated", "1.0", tk.END)
+
+        # Reset obfuscation level
+        self.reset_obfuscation_level()
 
     def show_mappings(self):
         """Show all current mappings in a new window"""

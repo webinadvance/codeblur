@@ -14,7 +14,11 @@ setup(
     url="https://pypi.org/project/codeblur/",
     packages=find_packages(),
     package_data={
-        "codeblur": ["known_words.json"],
+        "codeblur": [
+            "known_words.json",
+            "brand_words.json",
+            "package_words.json",
+        ],
     },
     include_package_data=True,
     classifiers=[
